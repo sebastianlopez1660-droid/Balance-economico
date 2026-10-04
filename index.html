@@ -654,9 +654,84 @@ function localCollection(prefix){
     }
   };
 }
+/* guardado en línea (Vercel + base de datos) para ver lo mismo en todos los dispositivos */
+var PIN_KEY='presupuesto2026:pin';
+function getPin(){try{return localStorage.getItem(PIN_KEY)||''}catch(e){return ''}}
+function apiErr(r){var e=new Error('http '+r.status);e.status=r.status;return e}
+function apiGet(pin){
+  return fetch('/api/data',{headers:{'x-pin':pin},cache:'no-store'}).then(function(r){
+    if(!r.ok)throw apiErr(r);return r.json();
+  });
+}
+function localDocs(prefix){
+  var out={},any=false;
+  for(var k=1;k<=12;k++){var raw=null;try{raw=localStorage.getItem(prefix+'m'+pad(k))}catch(e){}
+    if(raw){try{out['m'+pad(k)]=JSON.parse(raw);any=true}catch(e){}}}
+  if(!any)Object.keys(SEED).forEach(function(k){out['m'+pad(+k)]=SEED[k]});
+  return out;
+}
+function remoteCollection(pin,initial){
+  var cache=initial, listeners=[], writing=0, seq=0;
+  function snap(docs){return {docs:Object.keys(docs).sort().map(function(id){var x=docs[id];return {data:function(){return x}}}),metadata:{fromCache:false}}}
+  function poll(){
+    if(writing||document.hidden)return;
+    var s0=seq;
+    apiGet(pin).then(function(out){
+      if(writing||s0!==seq)return;
+      cache=out.docs||{};var sn=snap(cache);listeners.forEach(function(cb){cb(sn)});
+    },function(e){if(e.status===401)askPin('El PIN cambió. Escríbelo de nuevo.')});
+  }
+  setInterval(poll,15000);
+  document.addEventListener('visibilitychange',function(){if(!document.hidden)poll()});
+  window.addEventListener('focus',poll);
+  return {
+    doc:function(id){return {set:function(data){
+      writing++;seq++;
+      return fetch('/api/data',{method:'PUT',headers:{'Content-Type':'application/json','x-pin':pin},body:JSON.stringify({id:id,data:data})})
+        .then(function(r){writing--;seq++;if(!r.ok)throw apiErr(r);cache[id]=data},function(e){writing--;seq++;throw e});
+    }}},
+    onSnapshot:function(cb){listeners.push(cb);cb(snap(cache))}
+  };
+}
+function askPin(msg){
+  months=null;
+  view.innerHTML='<div class="card empty"><p><strong>Escribe tu PIN</strong></p>'+(msg?'<p class="muted">'+esc(msg)+'</p>':'')+
+    '<form id="pinForm"><input class="f" id="pinIn" type="password" inputmode="numeric" autocomplete="current-password" aria-label="PIN" style="max-width:220px;text-align:center;margin:0 auto 12px;display:block">'+
+    '<button class="btn primary" type="submit">Entrar</button></form></div>';
+  var inp=document.getElementById('pinIn');inp.focus();
+  document.getElementById('pinForm').addEventListener('submit',function(e){
+    e.preventDefault();try{localStorage.setItem(PIN_KEY,inp.value.trim())}catch(x){}
+    location.reload();
+  });
+}
+async function startRemote(){
+  var pin=getPin(), out;
+  try{out=await apiGet(pin)}
+  catch(e){
+    if(e.status===401){askPin(pin?'PIN incorrecto.':'');return true}
+    return false; /* sin servidor o sin base de datos: guardado local */
+  }
+  var docs=out.docs||{};
+  if(!Object.keys(docs).length){
+    /* primera vez: sube lo que hay en este navegador (o los datos iniciales) */
+    docs=localDocs('presupuesto2026:');
+    setSync('saving');
+    try{
+      await Promise.all(Object.keys(docs).map(function(id){
+        return fetch('/api/data',{method:'PUT',headers:{'Content-Type':'application/json','x-pin':pin},body:JSON.stringify({id:id,data:docs[id]})})
+          .then(function(r){if(!r.ok)throw apiErr(r)});
+      }));
+      setSync('ok');
+    }catch(e){setSync('err')}
+  }
+  col=remoteCollection(pin,docs);
+  col.onSnapshot(onSnapshot);
+  return true;
+}
 async function init(){
   renderTabs();
   if(!window.claude||!window.claude.use){
+    if(location.protocol!=='file:'&&await startRemote())return;
     try{localStorage.setItem('presupuesto2026:test','1');localStorage.removeItem('presupuesto2026:test')}
     catch(e){fatal('Tu navegador no permite guardar datos en este sitio.');return}
     seedLocal('presupuesto2026:');
