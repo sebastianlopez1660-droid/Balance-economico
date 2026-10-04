@@ -1,10 +1,12 @@
 // Guarda y lee los 12 meses del presupuesto en Upstash Redis (vía su API REST).
 // Variables de entorno en Vercel:
 //   KV_REST_API_URL / KV_REST_API_TOKEN  (o UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN)
-//   APP_PIN  — PIN que pide la página para ver y guardar los datos
+//   APP_PIN  — (opcional) PIN fijo. Si no existe, la página pide crear uno la primera
+//              vez y se guarda cifrado (scrypt) en la base de datos.
 const crypto = require('crypto');
 
 const KEY = 'presupuesto2026';
+const AUTH_KEY = 'presupuesto2026:auth';
 const DOC_ID = /^m(0[1-9]|1[0-2])$/;
 const MAX_DOC = 100000;
 
@@ -33,17 +35,50 @@ function samePin(a, b) {
   return crypto.timingSafeEqual(x, y);
 }
 
+function hashPin(pin, salt) {
+  return crypto.scryptSync(String(pin), salt, 32).toString('hex');
+}
+
+function readBody(req) {
+  let body = req.body;
+  if (typeof body === 'string') body = JSON.parse(body);
+  return body || {};
+}
+
 module.exports = async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   const cfg = config();
-  if (!cfg.url || !cfg.token || !cfg.pin) {
+  if (!cfg.url || !cfg.token) {
     return res.status(503).json({ error: 'not_configured' });
-  }
-  if (!samePin(req.headers['x-pin'] || '', cfg.pin)) {
-    return res.status(401).json({ error: 'bad_pin' });
   }
 
   try {
+    let stored = null;
+    if (!cfg.pin) {
+      stored = await redis(cfg, ['GET', AUTH_KEY]);
+      if (!stored) {
+        // Aún no hay PIN: solo se permite crearlo.
+        if (req.method === 'POST') {
+          const pin = String(readBody(req).pin || '');
+          if (!/^\d{4,12}$/.test(pin)) return res.status(400).json({ error: 'bad_pin_format' });
+          const salt = crypto.randomBytes(16).toString('hex');
+          const created = await redis(cfg, ['SET', AUTH_KEY, salt + ':' + hashPin(pin, salt), 'NX']);
+          if (!created) return res.status(409).json({ error: 'pin_exists' });
+          return res.status(200).json({ ok: true });
+        }
+        return res.status(428).json({ error: 'pin_not_set' });
+      }
+    }
+
+    const given = String(req.headers['x-pin'] || '');
+    let ok;
+    if (cfg.pin) ok = samePin(given, cfg.pin);
+    else {
+      const [salt, hash] = String(stored).split(':');
+      ok = samePin(hashPin(given, salt), hash);
+    }
+    if (!ok) return res.status(401).json({ error: 'bad_pin' });
+
     if (req.method === 'GET') {
       const flat = (await redis(cfg, ['HGETALL', KEY])) || [];
       const docs = {};
@@ -54,8 +89,7 @@ module.exports = async function handler(req, res) {
     }
 
     if (req.method === 'PUT') {
-      let body = req.body;
-      if (typeof body === 'string') body = JSON.parse(body);
+      const body = readBody(req);
       const id = body && body.id, data = body && body.data;
       if (!DOC_ID.test(String(id)) || !data || typeof data !== 'object') {
         return res.status(400).json({ error: 'bad_request' });

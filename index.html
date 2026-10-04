@@ -704,11 +704,31 @@ function askPin(msg){
     location.reload();
   });
 }
+function createPin(msg){
+  months=null;
+  view.innerHTML='<div class="card empty"><p><strong>Crea tu PIN</strong></p><p class="muted">Lo vas a usar para abrir la página en cualquier dispositivo. Solo números, de 4 a 12 dígitos.</p>'+
+    (msg?'<p class="over-note">'+esc(msg)+'</p>':'')+
+    '<form id="pinForm"><input class="f" id="pin1" type="password" inputmode="numeric" autocomplete="new-password" placeholder="PIN" aria-label="PIN nuevo" style="max-width:220px;text-align:center;margin:0 auto 8px;display:block">'+
+    '<input class="f" id="pin2" type="password" inputmode="numeric" autocomplete="new-password" placeholder="Repítelo" aria-label="Repite el PIN" style="max-width:220px;text-align:center;margin:0 auto 12px;display:block">'+
+    '<button class="btn primary" type="submit">Crear PIN</button></form></div>';
+  document.getElementById('pin1').focus();
+  document.getElementById('pinForm').addEventListener('submit',function(e){
+    e.preventDefault();
+    var a=document.getElementById('pin1').value.trim(),b=document.getElementById('pin2').value.trim();
+    if(!/^\d{4,12}$/.test(a)){createPin('El PIN debe tener solo números, de 4 a 12 dígitos.');return}
+    if(a!==b){createPin('Los dos PIN no coinciden.');return}
+    fetch('/api/data',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin:a})}).then(function(r){
+      if(r.ok||r.status===409){try{localStorage.setItem(PIN_KEY,a)}catch(x){}location.reload()}
+      else createPin('No se pudo crear el PIN. Intenta de nuevo.');
+    },function(){createPin('Sin conexión. Intenta de nuevo.')});
+  });
+}
 async function startRemote(){
   var pin=getPin(), out;
   try{out=await apiGet(pin)}
   catch(e){
     if(e.status===401){askPin(pin?'PIN incorrecto.':'');return true}
+    if(e.status===428){createPin();return true}
     return false; /* sin servidor o sin base de datos: guardado local */
   }
   var docs=out.docs||{};
